@@ -146,6 +146,62 @@ class InventoryOptimizationEngine:
         """
         return pd.read_sql_query(query, self.conn)
 
+    def markdown_pricing_strategy(self):
+        """Recommend dynamic markdowns for expiring/excess products (Real-world feature)"""
+        query = """
+        SELECT 
+            s.store_id,
+            s.store_name,
+            p.product_id,
+            p.product_name,
+            p.category,
+            p.unit_price,
+            p.shelf_life,
+            i.quantity_on_hand,
+            i.reorder_point,
+            (i.quantity_on_hand * 1.0 / NULLIF(i.reorder_point, 0)) as inventory_ratio,
+            CASE 
+                WHEN (i.quantity_on_hand * 1.0 / NULLIF(i.reorder_point, 0)) > 3.0 THEN 'EXCESS'
+                WHEN (i.quantity_on_hand * 1.0 / NULLIF(i.reorder_point, 0)) > 2.0 THEN 'HIGH'
+                ELSE 'NORMAL'
+            END as stock_status
+        FROM inventory i
+        JOIN stores s ON i.store_id = s.store_id
+        JOIN products p ON i.product_id = p.product_id
+        WHERE inventory_ratio > 1.5
+        ORDER BY inventory_ratio DESC
+        """
+        df = pd.read_sql_query(query, self.conn)
+        
+        if df.empty:
+            return df
+            
+        # Determine markdown percentage
+        def calculate_markdown(row):
+            ratio = row['inventory_ratio']
+            shelf = row['shelf_life']
+            category = row['category']
+            
+            # Perishable items get higher markdowns
+            markdown = 0
+            if category in ['Dairy', 'Bakery', 'Produce'] or shelf < 14:
+                if ratio > 3.0: markdown = 0.40
+                elif ratio > 2.0: markdown = 0.25
+                elif ratio > 1.5: markdown = 0.15
+            else:
+                if ratio > 4.0: markdown = 0.30
+                elif ratio > 3.0: markdown = 0.20
+                elif ratio > 2.0: markdown = 0.10
+                
+            return markdown
+            
+        df['markdown_pct'] = df.apply(calculate_markdown, axis=1)
+        df['new_price'] = df['unit_price'] * (1 - df['markdown_pct'])
+        df['potential_revenue_unlocked'] = df['quantity_on_hand'] * df['new_price']
+        
+        # Filter items that actually need markdown
+        return df[df['markdown_pct'] > 0].sort_values('potential_revenue_unlocked', ascending=False)
+
     def inventory_efficiency_metrics(self):
         """Calculate inventory efficiency KPIs"""
         query = """

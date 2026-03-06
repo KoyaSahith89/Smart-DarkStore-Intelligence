@@ -238,7 +238,7 @@ if page == "📊 Executive Dashboard":
                     fig = px.sunburst(
                         demand_df_clean,
                         values='area_revenue',
-                        names='area_name',
+                        path=['area_name'],
                         color='total_customers',
                         color_continuous_scale='RdYlGn',
                         title="Revenue & Customer Distribution"
@@ -788,7 +788,7 @@ elif page == "📦 Inventory Intelligence":
     with col1:
         # Get stores from database
         cursor = engine.conn.cursor()
-        cursor.execute("SELECT DISTINCT s.store_name FROM stores s JOIN store_metrics sm ON s.store_id = sm.store_id")
+        cursor.execute("SELECT 'All Stores' AS store_name UNION SELECT store_name FROM stores ORDER BY store_name")
         stores = [row[0] for row in cursor.fetchall()]
         selected_store = st.selectbox("🏪 Select Store", stores if stores else ["No stores"], key="inv_store")
     
@@ -798,10 +798,11 @@ elif page == "📦 Inventory Intelligence":
     with col3:
         time_period = st.selectbox("📅 Period", ["7 days", "30 days", "90 days"], key="inv_period")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 ABC Analysis", "⚠️ Risk & Alerts", "🎯 Optimization", "📈 Trends"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 ABC Analysis", "⚠️ Risk & Alerts", "🎯 Optimization", "🏷️ Markdown Strategy"])
     
     with tab1:
-        st.markdown("### ABC Inventory Classification")
+        st.markdown("### ABC Inventory Classification (Network Wide)")
+        st.info("💡 ABC Analysis is calculated based on total network sales history. Store-specific analysis is not yet available.")
         
         col1, col2 = st.columns(2)
         
@@ -976,8 +977,69 @@ elif page == "📦 Inventory Intelligence":
             )
     
     with tab4:
-        st.markdown("### Inventory Trend Analysis")
-        st.info("📊 Showing 30-day inventory trends")
+        st.markdown("### 🏷️ Dynamic Markdown Strategy")
+        st.info("💡 Real-world Application: Auto-suggest price markdowns for expiring/excess products to reduce waste.")
+        
+        markdown_df = engine.markdown_pricing_strategy()
+        
+        if not markdown_df.empty:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("📦 Items for Markdown", len(markdown_df))
+            
+            with col2:
+                avg_discount = markdown_df['markdown_pct'].mean() * 100
+                st.metric("📉 Avg Suggested Discount", f"{avg_discount:.1f}%")
+            
+            with col3:
+                revenue_unlocked = markdown_df['potential_revenue_unlocked'].sum()
+                st.metric("💰 Potential Revenue Recovery", f"${revenue_unlocked:,.0f}")
+                
+            st.markdown("---")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Top markdowns by revenue potential
+                top_markdowns = markdown_df.nlargest(10, 'potential_revenue_unlocked')
+                fig = px.bar(
+                    top_markdowns,
+                    x='product_name',
+                    y='potential_revenue_unlocked',
+                    color='markdown_pct',
+                    color_continuous_scale='Reds',
+                    title="Top Revenue Recovery Opportunities"
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+                
+            with col2:
+                # Markdown distribution
+                fig = px.pie(
+                    markdown_df,
+                    names='stock_status',
+                    values='potential_revenue_unlocked',
+                    title="Revenue Recovery by Stock Status",
+                    color_discrete_map={'EXCESS': '#f44', 'HIGH': '#ff9800', 'NORMAL': '#4caf50'}
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+                
+            st.markdown("### Recommended Action Items")
+            display_cols = ['store_name', 'product_name', 'category', 'shelf_life', 'unit_price', 'markdown_pct', 'new_price', 'potential_revenue_unlocked']
+            
+            # Format the display dataframe
+            display_df = markdown_df[display_cols].copy()
+            display_df['markdown_pct'] = (display_df['markdown_pct'] * 100).astype(str) + '%'
+            display_df['unit_price'] = '$' + display_df['unit_price'].round(2).astype(str)
+            display_df['new_price'] = '$' + display_df['new_price'].round(2).astype(str)
+            display_df['potential_revenue_unlocked'] = '$' + display_df['potential_revenue_unlocked'].round(2).astype(str)
+            
+            st.dataframe(display_df, use_container_width=True)
+            
+        else:
+            st.success("✅ No items currently require markdown pricing.")
 
     engine.close()
 
@@ -996,7 +1058,10 @@ elif page == "🚚 Delivery Excellence":
         sla_target = st.number_input("⏱️ SLA Target (minutes)", 15, 60, 30)
     
     with col2:
-        selected_area = st.selectbox("🗺️ Select Area", ["All Areas", "Area 1", "Area 2"])
+        cursor = analytics.conn.cursor()
+        cursor.execute("SELECT area_name FROM areas ORDER BY area_name")
+        areas_list = ["All Areas"] + [row[0] for row in cursor.fetchall()]
+        selected_area = st.selectbox("🗺️ Select Area", areas_list)
     
     with col3:
         sort_by = st.selectbox("📊 Sort By", ["SLA %", "Avg Time", "Orders"], key="delivery_sort")
@@ -1007,6 +1072,8 @@ elif page == "🚚 Delivery Excellence":
         st.markdown("### SLA Compliance Dashboard")
         
         sla_df = analytics.delivery_performance_sla(target_minutes=sla_target)
+        if selected_area != "All Areas" and not sla_df.empty:
+            sla_df = sla_df[sla_df['area_name'] == selected_area]
         
         if not sla_df.empty:
             col1, col2, col3, col4 = st.columns(4)
@@ -1112,6 +1179,12 @@ elif page == "🚚 Delivery Excellence":
         
         predictions_df = delivery_engine.get_predictions_summary()
         
+        if predictions_df.empty:
+            with st.spinner("🤖 Training model and generating predictions..."):
+                delivery_engine.train_and_predict()
+                delivery_engine.save_predictions_to_db()
+                predictions_df = delivery_engine.get_predictions_summary()
+        
         if not predictions_df.empty:
             col1, col2 = st.columns(2)
             
@@ -1181,22 +1254,39 @@ elif page == "🔮 Demand Insights":
     with tab1:
         st.markdown("### Demand Forecast - Next 7 Days")
         
-        forecast_df = engine.get_forecast_summary()
+        forecast_cache = engine.generate_all_forecasts(forecast_days=max(7, forecast_days))
         
-        if forecast_df.empty:
-            st.info("📊 Generating demand forecasts...")
-            # Create sample forecast data for demonstration
-            from datetime import datetime, timedelta
-            dates = [datetime.now() + timedelta(days=i) for i in range(7)]
-            forecast_df = pd.DataFrame({
-                'forecast_date': dates,
-                'product_name': ['Product A', 'Product B', 'Product C', 'Product A', 'Product B', 'Product C', 'Product A'],
-                'forecasted_quantity': [150, 120, 180, 160, 130, 175, 155],
-                'confidence_interval_lower': [140, 110, 170, 150, 120, 165, 145],
-                'confidence_interval_upper': [160, 130, 190, 170, 140, 185, 165],
-                'product_id': [1, 2, 3, 1, 2, 3, 1],
-                'store_id': [1, 1, 1, 2, 2, 2, 3]
-            })
+        if not forecast_cache:
+            st.warning("⚠️ No forecast data generated yet.")
+            forecast_df = pd.DataFrame()
+        else:
+            with st.spinner("Calculating genuine predictions based on Confidence Level..."):
+                rows = []
+                base_date = datetime.now().date()
+                z_scores = {50: 0.674, 75: 1.150, 80: 1.282, 95: 1.960}
+                z = z_scores.get(confidence_level, 1.96)
+                
+                for f in forecast_cache:
+                    for day_offset in range(forecast_days):
+                        if len(f['forecast']) <= day_offset:
+                            continue
+                        f_qty = max(0, f['forecast'][day_offset])
+                        # Calculate margin dynamically based on inputs
+                        history_std = np.std(f['history'][-30:]) if len(f['history']) > 0 else 0
+                        margin_of_error = z * history_std
+                        
+                        rows.append({
+                            'forecast_date': pd.to_datetime(base_date + timedelta(days=day_offset+1)),
+                            'product_name': f['product_name'],
+                            'product_id': f['product_id'],
+                            'store_id': f['store_id'],
+                            'category': f['category'],
+                            'forecasted_quantity': f_qty,
+                            'revenue_est': f_qty * f.get('unit_price', 10), # Default to 10 if missing
+                            'confidence_interval_lower': max(0, f_qty - margin_of_error),
+                            'confidence_interval_upper': f_qty + margin_of_error
+                        })
+                forecast_df = pd.DataFrame(rows)
         
         if not forecast_df.empty:
             col1, col2, col3 = st.columns(3)
@@ -1382,215 +1472,6 @@ elif page == "🔮 Demand Insights":
     engine.close()
 
 
-# ============= Market & Expansion =============
-elif page == "🗺️ Market & Expansion":
-    st.title("🗺️ Market & Expansion Strategy")
-    st.markdown("*Data-driven location optimization for maximum ROI*")
-
-    engine = LocationOptimizationEngine()
-    profit_engine = ProfitSimulationEngine()
-
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        investment = st.number_input("💰 Investment per store ($)", 100000, 1000000, 500000, 50000)
-    
-    with col2:
-        expansion_type = st.selectbox("🎯 Focus on", ["ROI", "Coverage Gaps", "Market Potential"])
-
-    tab1, tab2, tab3, tab4 = st.tabs(["🎯 Opportunities", "📊 Market Analysis", "🗺️ Coverage Map", "💹 ROI Forecast"])
-    
-    with tab1:
-        st.markdown("### High-Priority Expansion Opportunities")
-        
-        roi_df = engine.expansion_roi_estimate(store_investment=investment)
-        
-        if not roi_df.empty:
-            # Top metrics
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                high_priority = len(roi_df[roi_df['recommendation'] == 'HIGH PRIORITY'])
-                st.metric("🔴 High Priority", high_priority)
-            
-            with col2:
-                med_priority = len(roi_df[roi_df['recommendation'] == 'MEDIUM PRIORITY'])
-                st.metric("🟡 Medium Priority", med_priority)
-            
-            with col3:
-                avg_roi = roi_df['roi_percentage'].mean()
-                st.metric("📈 Avg ROI", f"{avg_roi:.0f}%")
-            
-            with col4:
-                top_roi = roi_df['roi_percentage'].max()
-                st.metric("🏆 Max ROI", f"{top_roi:.0f}%")
-            
-            st.markdown("---")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                fig = px.bar(
-                    roi_df.head(10),
-                    x='area_name',
-                    y='roi_percentage',
-                    color='recommendation',
-                    color_discrete_map={
-                        'HIGH PRIORITY': '#f44',
-                        'MEDIUM PRIORITY': '#ff9800',
-                        'LOW PRIORITY': '#4caf50'
-                    },
-                    title="Expansion ROI by Area"
-                )
-                fig.update_xaxes(tickangle=45)
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                fig = px.scatter(
-                    roi_df,
-                    x='population',
-                    y='roi_percentage',
-                    size='total_revenue',
-                    hover_name='area_name',
-                    color='recommendation',
-                    color_discrete_map={
-                        'HIGH PRIORITY': '#f44',
-                        'MEDIUM PRIORITY': '#ff9800',
-                        'LOW PRIORITY': '#4caf50'
-                    },
-                    title="Population vs ROI Opportunity"
-                )
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-            st.markdown("### Detailed Expansion Analysis")
-            display_cols = ['area_name', 'opportunity_score', 'recommendation', 'population', 
-                           'total_revenue', 'roi_percentage']
-            
-            st.dataframe(
-                roi_df[display_cols].head(15),
-                use_container_width=True
-            )
-    
-    with tab2:
-        st.markdown("### Market Demand & Characteristics")
-        
-        demand_df = engine.market_demand_analysis()
-        
-        if not demand_df.empty:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                fig = px.scatter(
-                    demand_df,
-                    x='registered_customers',
-                    y='total_revenue',
-                    size='population',
-                    hover_name='area_name',
-                    title="Customer Base vs Revenue"
-                )
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                top_areas = demand_df.nlargest(5, 'total_revenue')
-                
-                fig = px.pie(
-                    values=top_areas['total_revenue'],
-                    names=top_areas['area_name'],
-                    title="Revenue Distribution (Top 5 Areas)"
-                )
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-            st.dataframe(demand_df.head(10), use_container_width=True)
-    
-    with tab3:
-        st.markdown("### Coverage Gap Analysis")
-        
-        coverage_df = engine.coverage_gap_analysis()
-        
-        if not coverage_df.empty:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                fig = px.bar(
-                    coverage_df.head(10),
-                    x='area_name',
-                    y='population_per_store',
-                    color='coverage_status',
-                    color_discrete_map={
-                        'CRITICAL - No Coverage': '#f44',
-                        'HIGH - Severely Underserved': '#ff9800',
-                        'MEDIUM - Underserved': '#ffc107',
-                        'LOW - Adequately Served': '#4caf50'
-                    },
-                    title="Population per Store (Coverage Gap)"
-                )
-                fig.update_xaxes(tickangle=45)
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                status_count = coverage_df['coverage_status'].value_counts()
-                fig = px.pie(
-                    values=status_count.values,
-                    names=status_count.index,
-                    color_discrete_sequence=['#f44', '#ff9800', '#ffc107', '#4caf50'],
-                    title="Market Coverage Status"
-                )
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-            st.dataframe(coverage_df.head(10), use_container_width=True)
-    
-    with tab4:
-        st.markdown("### Year 1 ROI Forecast")
-        
-        cursor = engine.conn.cursor()
-        cursor.execute("SELECT area_id FROM areas LIMIT 1")
-        area_result = cursor.fetchone()
-        
-        if area_result:
-            area_id = area_result[0]
-            sim = profit_engine.simulate_new_store_expansion(area_id, estimated_monthly_revenue=50000)
-            
-            if sim:
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.metric("💰 Investment", f"${sim['initial_investment']:,.0f}")
-                
-                with col2:
-                    st.metric("📊 Year 1 Profit", f"${sim['year_1_profit']:,.0f}")
-                
-                with col3:
-                    st.metric("📈 ROI %", f"{sim['year_1_roi']:.1f}%")
-                
-                with col4:
-                    st.metric("⏱️ Payback", f"{sim['payback_month']:.1f}m")
-                
-                st.markdown("---")
-                
-                fig = px.line(
-                    sim['simulation'],
-                    x='month',
-                    y='cumulative_profit',
-                    markers=True,
-                    title="Cumulative Profit Projection (Year 1)",
-                    labels={'cumulative_profit': 'Profit ($)', 'month': 'Month'}
-                )
-                fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
-                fig.update_layout(height=450)
-                st.plotly_chart(fig, use_container_width=True)
-    
-    engine.close()
-    profit_engine.close()
-
 
 # ============= Financial Simulation =============
 elif page == "💰 Financial Simulation":
@@ -1649,19 +1530,23 @@ elif page == "💰 Financial Simulation":
                         y='profit_change_percentage',
                         color='profit_change_percentage',
                         color_continuous_scale='RdYlGn',
-                        title="Profit Impact by Store"
+                        title="Profit Impact by Store (%)"
                     )
                     fig.add_hline(y=0, line_dash="dash", line_color="gray")
                     fig.update_xaxes(tickangle=45)
                     st.plotly_chart(fig, use_container_width=True)
                 
                 with col2:
-                    fig = px.histogram(
+                    fig = px.scatter(
                         pricing_df,
-                        x='profit_change_percentage',
-                        nbins=15,
-                        title="Distribution of Profit Changes"
+                        x='net_profit',
+                        y='new_net_profit',
+                        color='profit_change',
+                        color_continuous_scale='RdYlGn',
+                        title="Base vs Simulated Profit",
+                        labels={'net_profit': 'Current Profit ($)', 'new_net_profit': 'New Profit ($)'}
                     )
+                    fig.add_shape(type="line", x0=0, y0=0, x1=pricing_df['net_profit'].max(), y1=pricing_df['net_profit'].max(), line=dict(color="gray", dash="dash"))
                     st.plotly_chart(fig, use_container_width=True)
                 
                 st.markdown("---")

@@ -116,6 +116,7 @@ class SQLAnalytics:
         SELECT 
             s.store_id,
             s.store_name,
+            a.area_name,
             COUNT(d.delivery_id) as total_deliveries,
             COUNT(CASE WHEN d.delivery_status = 'delivered' THEN 1 END) as completed_deliveries,
             COUNT(CASE WHEN d.delivery_time_minutes <= {target_minutes} THEN 1 END) as on_time_deliveries,
@@ -125,8 +126,9 @@ class SQLAnalytics:
             ROUND(AVG(d.rating), 2) as avg_rating,
             COUNT(CASE WHEN d.rating >= 4.5 THEN 1 END) as excellent_ratings
         FROM stores s
+        JOIN areas a ON s.area_id = a.area_id
         LEFT JOIN deliveries d ON s.store_id = d.store_id
-        GROUP BY s.store_id, s.store_name
+        GROUP BY s.store_id, s.store_name, a.area_name
         ORDER BY sla_compliance_percentage DESC
         """
         return pd.read_sql_query(query, self.conn)
